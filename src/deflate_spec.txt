@@ -1,0 +1,153 @@
+1)  Count the number of codes for each code length.  Let
+             bl_count[N] be the number of codes of length N, N >= 1.
+
+         2)  Find the numerical value of the smallest code for each
+             code length:
+
+                code = 0;
+                bl_count[0] = 0;
+                for (bits = 1; bits <= MAX_BITS; bits++) {
+                    code = (code + bl_count[bits-1]) << 1;
+                    next_code[bits] = code;
+                }
+
+         3)  Assign numerical values to all codes, using consecutive
+             values for all codes of the same length with the base
+             values determined at step 2. Codes that are never used
+             (which have a bit length of zero) must not be assigned a
+             value.
+
+                for (n = 0;  n <= max_code; n++) {
+                    len = tree[n].Len;
+                    if (len != 0) {
+                        tree[n].Code = next_code[len];
+                        next_code[len]++;
+                    }
+
+Series of blocks
+	each block is compressed using LZ77 and huffman coding
+		Two parts - pair of huffman code trees describing compressed data part (trees themselves are compressed using huffman)
+					compressed data - two parts
+									literal bytes
+										represented using a huffman code, appear just before compressed data for each block
+											one code tree for literals and lengths
+											one for distances
+									pointers to duplicated strings
+										represented as a pair <length, backward distance>
+										limits distance to 32k and lengths to 258 bytes
+
+Bit order
+	huffman codes are bit reversed
+
+Compressed block format
+	start with 3 header bits
+		BFINAL - first bit
+			Set when it this is the last block of data set
+		BTYPE  - BTYPE
+			specifies how data are compressed
+				00	- no compression
+					any bits of input upto next byte boundary are ignored.
+					LEN-NLEN-LEN bytes of literal data
+					LEN is no of data bytes in the block 
+					NLEN is one's complement of LEN (error checking/redundancy)
+				01	- compressed with fixed huffman codes
+				10	- compressed with dynamic huffman codes
+				11	- reserved (error)
+	
+	Compressed blocks
+		literal bytes from alphabet of byte values(0 to 255)
+		<length, backward distance> pairs
+			length is (3 to 258) and distance is (1 to 32,768)
+		literal and length alphabets are merged into a single alphabet (0 to 285)
+			(0 to 255) represent literal bytes
+			256 represents end of block
+			(257 to 285) represent length codes
+				possibly in conjunction with extra bits following the spec below
+
+				Code | Extra Bits | Length          Code | Extra Bits | Distance
+				257  | 0          | 3				0    | 0          | 1
+				258  | 1          | 11,12 			3    | 0          | 4
+				269  | 2          | 19-22			4    | 1          | 5,6
+				274  | 3          | 43-50			29   | 13         | 24577 - 32768
+
+	Distance codes 0-31 are represented by fixed-length 5-bit codes, with possible additional bits
+	30-31 will never actually occur in the compressed data
+
+	01 - Compression with fixed Huffman codes
+			Huffman code lengths for the literal/length alphabet are:
+
+		Lit Value | Bits | Codes
+		0 - 143   | 8    | 00110000 through
+						   10111111
+		144 - 255 | 9    | 110010000 through
+						   111111111
+		256 - 279 | 7    | 0000000 through
+						   0010111
+		280 - 287 | 8    | 11000000 through   ( 286-287 will never actually occur in the compressed data,
+						   11000111				but will participate in code construction)
+
+	10 - Compression with dynamic huffman codes
+		Huffman codes for the two alphabets appear in the block immediately after the header bits and before
+		the actual compressed data, first the lit/length code and then the distance code
+		Each code is defined by a sequence of code lengths. The code length sequences themselves are
+		compressed using a huffman code
+
+		alphabet for code lengths 
+			0 - 15 : code lengths of 0 - 15
+				16 : Copy the previous code length 3-6 times
+					 The next 2 bits indicate repeat length ( 0 = 3, ... , 3 = 6)
+			 	17 : repeat a code length of 0 for 3 - 10 times. (3 bits of length)
+				18 : repeat a code length of 0 for 11 - 138 times (7 bits of length)
+			
+			code length of 0 indicates the the corresponding symbol in the lit/length or distance alphabet
+			will not occur in the block and should not participate in the huffman code construction algorithm
+			If only one distance code is used, it is encoded using one bit, not zero bits. 
+			one distance code of zero bits means that there are no distance codes used at all. (all literal data)
+
+FINAL FORMAT:
+	5 Bits : HLIT, # of lit/length codes - 257 (257-286)
+	5 Bits : HDIST, # of Distance codes - 1 (1 - 32)
+	4 Bits : HCLEN, # of Code length codes - 4 (4 - 19)
+	
+	(HCLEN + 4) x 3 bits : code lengths for the code length alphabet above, in the order:
+	16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15
+		These are interpreted as 3-bit integers
+		(0-7); as above, a code length of 0 means the corresponding
+		symbol (lit/length or distance code length) is not used
+	
+	HLIT + 257 code lengths for the lit/length alphabet, encoded using
+	the code length huffman code
+
+	HDIST + 1 code lengths for the distance alphabet, 
+	encode using the code length Huffman code
+
+	The actual compressed data of the block, encoded using the lit/length
+	and distance Huffman codes
+
+	The lit/length sybmol 256 (end of data), encoded suing
+	lit/length huffman code
+
+The code length repeat codes can cross from HLIT + 257 to the HDIST + 1 code lengths. In other words,
+all code lengths form a single sequence of HLIT + HDIST + 258 values.
+
+Decoding algorithm
+	do {
+		read block header
+		if no compression {
+			skip any remaining bits in current byte
+			read LEN and NLEN
+			copy LEN bytes of data to output
+		} else {
+			if dynamic huffman read representation of code tree 
+			loop until end of block code {
+				decode literal/length value
+				if value < 256 copy value (literal byte) to output
+				else {
+					if value = end of block (256) break from loop
+					else decode distance from input stream
+					move backwards distance bytes in the output stream and
+					copy length bytes from this position to the output stream
+				}
+			}
+		}
+	}
